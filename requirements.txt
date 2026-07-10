@@ -1,5 +1,6 @@
-# Web UI
-gradio>=5.9.0,<6
+# Pin Gradio 5.50.x (theme/css no Blocks; launch NÃO aceita theme/css)
+# Gradio 6 moveu theme/css para launch() — não usar no Render ainda.
+gradio==5.50.0
 
 # Graph
 networkx>=3.2

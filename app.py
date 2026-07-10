@@ -392,9 +392,11 @@ THEME = gr.themes.Soft(
 
 
 def build_ui() -> gr.Blocks:
-    # theme/css vão para launch() (Gradio 5+/6 — evita UserWarning de depreciação)
+    # Gradio 5.50: theme e css ficam no Blocks (NÃO no launch).
     with gr.Blocks(
         title="Graphify — Knowledge Graph for Obsidian",
+        theme=THEME,
+        css=CUSTOM_CSS,
         analytics_enabled=False,
     ) as demo:
         gr.Markdown(
@@ -620,7 +622,7 @@ graph = client.predict(api_name="/api_export_json")
 demo = build_ui()
 
 if __name__ == "__main__":
-    port = _resolve_port()
+    port = _resolve_port()  # Render: PORT (ex. 10000); local/HF: 7860
     host = os.getenv("HOST", "0.0.0.0")
     concurrency = int(os.getenv("GRAPHIFY_CONCURRENCY", "2"))
 
@@ -629,15 +631,12 @@ if __name__ == "__main__":
     # queue() limita carga no free tier do Render
     demo.queue(default_concurrency_limit=concurrency)
 
+    # Gradio 5.50: launch NÃO aceita theme/css (vão no Blocks acima)
     demo.launch(
         server_name=host,
         server_port=port,
         share=False,
-        theme=THEME,
-        css=CUSTOM_CSS,
         show_error=True,
-        # Evita abrir browser no servidor
         inbrowser=False,
-        # Estabilidade em containers (Render)
         quiet=False,
     )
