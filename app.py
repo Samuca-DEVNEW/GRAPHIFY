@@ -1,13 +1,15 @@
 """
-Graphify — Hugging Face Space
-Grafo de conhecimento a partir de vaults Obsidian.
+Graphify — Knowledge Graph for Obsidian vaults.
 
-Interface Gradio + API consumível pelo Worker DANTE.
+Gradio UI + API for DANTE workers.
+Compatible with Hugging Face Spaces and Render.com (PORT env).
 """
 
 from __future__ import annotations
 
 import json
+import logging
+import os
 import tempfile
 import traceback
 from pathlib import Path
@@ -34,8 +36,20 @@ from utils.vault_loader import (
 from utils.visualize import plot_graph
 
 # ---------------------------------------------------------------------------
-# Estado em memória do Space (processo)
+# Logging
 # ---------------------------------------------------------------------------
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s | %(levelname)s | graphify | %(message)s",
+)
+logger = logging.getLogger("graphify")
+
+# ---------------------------------------------------------------------------
+# Estado em memória do processo
+# ---------------------------------------------------------------------------
+
 
 class GraphState:
     """Mantém o grafo atual e metadados entre interações da UI."""
@@ -51,7 +65,10 @@ class GraphState:
 
     def clear(self) -> None:
         if self.work_dir:
-            cleanup_workspace(self.work_dir)
+            try:
+                cleanup_workspace(self.work_dir)
+            except Exception as exc:
+                logger.warning("Falha ao limpar workspace: %s", exc)
         self.__init__()
 
     def is_ready(self) -> bool:
@@ -62,8 +79,34 @@ STATE = GraphState()
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _resolve_port() -> int:
+    """
+    Porta do servidor HTTP.
+    Render define PORT (ex.: 10000). Local/HF Spaces usam 7860 por padrão.
+    """
+    raw = os.getenv("PORT") or os.getenv("GRADIO_SERVER_PORT") or "7860"
+    try:
+        port = int(raw)
+        if not (1 <= port <= 65535):
+            raise ValueError(f"porta fora do range: {port}")
+        return port
+    except (TypeError, ValueError) as exc:
+        logger.warning("PORT inválida (%r): %s — usando 7860", raw, exc)
+        return 7860
+
+
+def _empty_outputs(status: str) -> tuple[Any, str, str, str, str]:
+    return plot_graph(nx.Graph()), "", status, "", ""
+
+
+# ---------------------------------------------------------------------------
 # Pipeline principal
 # ---------------------------------------------------------------------------
+
 
 def process_vault(
     github_url: str,
@@ -77,31 +120,23 @@ def process_vault(
     Returns:
         (plotly_fig, metrics_md, status_md, json_preview, export_path_or_empty)
     """
+
     def report(v: float, msg: str) -> None:
         try:
             progress(v, desc=msg)
         except Exception:
             pass
 
-    # Validação de entrada
     has_url = bool((github_url or "").strip())
     has_zip = zip_file is not None and str(zip_file).strip() != ""
 
     if has_url and has_zip:
-        return (
-            plot_graph(nx.Graph()),
-            "",
-            "⚠️ Informe **apenas uma** fonte: URL do GitHub **ou** upload ZIP.",
-            "",
-            "",
+        return _empty_outputs(
+            "⚠️ Informe **apenas uma** fonte: URL do GitHub **ou** upload ZIP."
         )
     if not has_url and not has_zip:
-        return (
-            plot_graph(nx.Graph()),
-            "",
-            "⚠️ Forneça a **URL do repositório GitHub** ou faça **upload de um ZIP** do vault.",
-            "",
-            "",
+        return _empty_outputs(
+            "⚠️ Forneça a **URL do repositório GitHub** ou faça **upload de um ZIP** do vault."
         )
 
     work_dir = default_work_dir()
@@ -112,15 +147,16 @@ def process_vault(
         report(0.05, "Carregando vault…")
         if has_url:
             STATE.source = github_url.strip()
+            logger.info("Clonando vault: %s", STATE.source)
             vault_root = load_vault_from_github(
                 github_url.strip(),
                 work_dir=str(work_dir),
                 progress=report,
             )
         else:
-            # Gradio pode entregar str path ou objeto com .name
             zip_path = getattr(zip_file, "name", None) or str(zip_file)
             STATE.source = f"zip:{Path(zip_path).name}"
+            logger.info("Extraindo vault ZIP: %s", STATE.source)
             vault_root = load_vault_from_zip(
                 zip_path,
                 work_dir=str(work_dir),
@@ -130,6 +166,11 @@ def process_vault(
         vault = parse_vault(vault_root, progress=report)
         summary = vault.to_summary()
         STATE.vault_summary = summary
+        logger.info(
+            "Vault parseado: %s notas, %s wikilinks",
+            summary.get("total_notes"),
+            summary.get("total_wikilinks"),
+        )
 
         G = build_graph(vault, include_orphan_targets=include_missing, progress=report)
         community_map = detect_communities(G, progress=report)
@@ -158,24 +199,33 @@ def process_vault(
             f"- **Comunidades:** {metrics.get('communities', 0)}\n"
         )
 
-        # Preview do JSON (limitado na UI)
         preview = STATE.json_export
         if len(preview) > 12_000:
-            preview = preview[:12_000] + "\n… (truncado na prévia; use Exportar JSON completo)"
+            preview = (
+                preview[:12_000]
+                + "\n… (truncado na prévia; use Exportar JSON completo)"
+            )
 
-        # Arquivo temporário para download
         export_path = str(Path(tempfile.gettempdir()) / "graphify_graph.json")
         Path(export_path).write_text(STATE.json_export, encoding="utf-8")
 
         report(1.0, "Concluído")
+        logger.info(
+            "Grafo pronto: %s nós, %s arestas",
+            metrics.get("nodes"),
+            metrics.get("edges"),
+        )
         return fig, report_md, status, preview, export_path
 
     except Exception as exc:
+        logger.exception("Erro ao processar vault: %s", exc)
         err = f"### ❌ Erro ao processar vault\n\n```\n{exc}\n```"
-        # Em debug, anexa traceback curto
         tb = traceback.format_exc(limit=4)
-        err += f"\n<details><summary>Detalhes técnicos</summary>\n\n```\n{tb}\n```\n</details>"
-        return plot_graph(nx.Graph()), "", err, "", ""
+        err += (
+            f"\n<details><summary>Detalhes técnicos</summary>\n\n"
+            f"```\n{tb}\n```\n</details>"
+        )
+        return _empty_outputs(err)
 
 
 def handle_query(
@@ -188,21 +238,30 @@ def handle_query(
 ) -> tuple[str, str]:
     """Executa consulta no grafo carregado. Retorna (markdown, json)."""
     if not STATE.is_ready():
-        msg = "⚠️ Nenhum grafo carregado. Processe um vault na aba **Processar Vault**."
+        msg = (
+            "⚠️ Nenhum grafo carregado. "
+            "Processe um vault na aba **Processar Vault**."
+        )
         return msg, json.dumps({"ok": False, "error": "no_graph"}, ensure_ascii=False)
 
-    result = run_query(
-        STATE.graph,  # type: ignore[arg-type]
-        mode=mode,
-        query=query,
-        source=source,
-        target=target,
-        community_id=int(community_id or 0),
-        limit=int(limit or 25),
-    )
-    md = format_query_result(result)
-    raw = json.dumps(result, ensure_ascii=False, indent=2)
-    return md, raw
+    try:
+        result = run_query(
+            STATE.graph,  # type: ignore[arg-type]
+            mode=mode,
+            query=query,
+            source=source,
+            target=target,
+            community_id=int(community_id or 0),
+            limit=int(limit or 25),
+        )
+        md = format_query_result(result)
+        raw = json.dumps(result, ensure_ascii=False, indent=2)
+        logger.info("Query mode=%s ok=%s", mode, result.get("ok", True))
+        return md, raw
+    except Exception as exc:
+        logger.exception("Erro na query: %s", exc)
+        err = {"ok": False, "error": str(exc)}
+        return f"❌ **Erro na consulta:** {exc}", json.dumps(err, ensure_ascii=False)
 
 
 def handle_export() -> tuple[str, str]:
@@ -210,15 +269,20 @@ def handle_export() -> tuple[str, str]:
     if not STATE.is_ready():
         return "", "⚠️ Nenhum grafo para exportar."
 
-    STATE.json_export = export_graph_json(
-        STATE.graph,  # type: ignore[arg-type]
-        metrics=STATE.metrics,
-        vault_summary=STATE.vault_summary,
-        community_map=STATE.community_map,
-    )
-    export_path = str(Path(tempfile.gettempdir()) / "graphify_graph.json")
-    Path(export_path).write_text(STATE.json_export, encoding="utf-8")
-    return export_path, "✅ JSON exportado. Use o botão de download abaixo."
+    try:
+        STATE.json_export = export_graph_json(
+            STATE.graph,  # type: ignore[arg-type]
+            metrics=STATE.metrics,
+            vault_summary=STATE.vault_summary,
+            community_map=STATE.community_map,
+        )
+        export_path = str(Path(tempfile.gettempdir()) / "graphify_graph.json")
+        Path(export_path).write_text(STATE.json_export, encoding="utf-8")
+        logger.info("JSON exportado: %s bytes", len(STATE.json_export))
+        return export_path, "✅ JSON exportado. Use o botão de download abaixo."
+    except Exception as exc:
+        logger.exception("Erro no export: %s", exc)
+        return "", f"❌ Erro ao exportar: {exc}"
 
 
 def api_process_vault(
@@ -231,7 +295,8 @@ def api_process_vault(
     Uso via Gradio Client:
         client.predict(github_url, True, api_name="/api_process_vault")
     """
-    fig, report_md, status, preview, export_path = process_vault(
+    logger.info("API process_vault url=%r", github_url)
+    _fig, report_md, status, _preview, _export_path = process_vault(
         github_url=github_url,
         zip_file=None,
         include_missing=include_missing,
@@ -271,30 +336,38 @@ def api_query(
     """Endpoint API de consulta para o DANTE."""
     if not STATE.is_ready():
         return {"ok": False, "error": "no_graph", "results": []}
-    return run_query(
-        STATE.graph,  # type: ignore[arg-type]
-        mode=mode,
-        query=query,
-        source=source,
-        target=target,
-        community_id=community_id,
-        limit=limit,
-    )
+    try:
+        return run_query(
+            STATE.graph,  # type: ignore[arg-type]
+            mode=mode,
+            query=query,
+            source=source,
+            target=target,
+            community_id=int(community_id or 0),
+            limit=int(limit or 25),
+        )
+    except Exception as exc:
+        logger.exception("API query error: %s", exc)
+        return {"ok": False, "error": str(exc), "results": []}
 
 
 def api_export_json() -> dict[str, Any]:
     """Endpoint API que devolve o grafo JSON completo."""
     if not STATE.is_ready():
         return {"ok": False, "error": "no_graph", "graph": None}
-    return {
-        "ok": True,
-        "graph": graph_to_dict(
-            STATE.graph,  # type: ignore[arg-type]
-            metrics=STATE.metrics,
-            vault_summary=STATE.vault_summary,
-            community_map=STATE.community_map,
-        ),
-    }
+    try:
+        return {
+            "ok": True,
+            "graph": graph_to_dict(
+                STATE.graph,  # type: ignore[arg-type]
+                metrics=STATE.metrics,
+                vault_summary=STATE.vault_summary,
+                community_map=STATE.community_map,
+            ),
+        }
+    except Exception as exc:
+        logger.exception("API export error: %s", exc)
+        return {"ok": False, "error": str(exc), "graph": None}
 
 
 # ---------------------------------------------------------------------------
@@ -319,10 +392,9 @@ THEME = gr.themes.Soft(
 
 
 def build_ui() -> gr.Blocks:
+    # theme/css vão para launch() (Gradio 5+/6 — evita UserWarning de depreciação)
     with gr.Blocks(
         title="Graphify — Knowledge Graph for Obsidian",
-        theme=THEME,
-        css=CUSTOM_CSS,
         analytics_enabled=False,
     ) as demo:
         gr.Markdown(
@@ -364,7 +436,9 @@ e exporte JSON estruturado para o **DANTE**.
                             elem_classes=["status-box"],
                         )
                     with gr.Column(scale=1):
-                        metrics_md = gr.Markdown("_Métricas aparecerão aqui após o processamento._")
+                        metrics_md = gr.Markdown(
+                            "_Métricas aparecerão aqui após o processamento._"
+                        )
 
                 graph_plot = gr.Plot(label="Visualização do grafo")
 
@@ -446,7 +520,7 @@ Campos principais: `nodes`, `edges`, `communities`, `metrics`, `metadata`.
                     """
 ## Integração com DANTE
 
-Este Space expõe funções via **Gradio API**. O Worker DANTE pode:
+Este app expõe funções via **Gradio API**. O Worker DANTE pode:
 
 1. Chamar `/api_process_vault` com a URL do vault
 2. Consultar com `/api_query`
@@ -457,36 +531,22 @@ Este Space expõe funções via **Gradio API**. O Worker DANTE pode:
 ```python
 from gradio_client import Client
 
-client = Client("SEU_USUARIO/graphify")  # ou URL do Space
+client = Client("https://SEU-SERVICO.onrender.com")
 
-# 1) Processar vault
 result = client.predict(
     "https://github.com/usuario/vault-obsidian",
-    True,  # include_missing
+    True,
     api_name="/api_process_vault",
 )
 print(result["metrics"])
 
-# 2) Buscar nós
 hits = client.predict(
     "search", "inteligência artificial", "", "", 0, 20,
     api_name="/api_query",
 )
 
-# 3) Path finding
-path = client.predict(
-    "path", "", "Nota A", "Nota B", 0, 10,
-    api_name="/api_query",
-)
-
-# 4) Export JSON
 graph = client.predict(api_name="/api_export_json")
 ```
-
-### Endpoints HTTP (view API)
-
-Abra a página do Space → **Use via API** / **View API** para ver o schema
-exato dos endpoints gerados pelo Gradio.
                     """
                 )
 
@@ -560,8 +620,24 @@ exato dos endpoints gerados pelo Gradio.
 demo = build_ui()
 
 if __name__ == "__main__":
-    demo.queue(default_concurrency_limit=2).launch(
-        server_name="0.0.0.0",
-        server_port=7860,
+    port = _resolve_port()
+    host = os.getenv("HOST", "0.0.0.0")
+    concurrency = int(os.getenv("GRAPHIFY_CONCURRENCY", "2"))
+
+    logger.info("Iniciando Graphify em %s:%s (concurrency=%s)", host, port, concurrency)
+
+    # queue() limita carga no free tier do Render
+    demo.queue(default_concurrency_limit=concurrency)
+
+    demo.launch(
+        server_name=host,
+        server_port=port,
+        share=False,
+        theme=THEME,
+        css=CUSTOM_CSS,
         show_error=True,
+        # Evita abrir browser no servidor
+        inbrowser=False,
+        # Estabilidade em containers (Render)
+        quiet=False,
     )

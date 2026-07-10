@@ -1,0 +1,17 @@
+# Blueprint opcional do Render (Infrastructure as Code)
+# Docs: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: graphify
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -u app.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: LOG_LEVEL
+        value: INFO
+      - key: GRAPHIFY_CONCURRENCY
+        value: "2"
+      # PORT é injetada automaticamente pelo Render — não defina manualmente

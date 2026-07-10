@@ -1,6 +1,11 @@
-gradio>=4.44.0,<6
+# Web UI
+gradio>=5.9.0,<6
+
+# Graph
 networkx>=3.2
 plotly>=5.22.0
-GitPython>=3.1.43
 numpy>=1.26.0
 pandas>=2.1.0
+
+# Vault loading (GitHub clone)
+GitPython>=3.1.43
