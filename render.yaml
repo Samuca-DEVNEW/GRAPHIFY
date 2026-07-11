@@ -14,4 +14,8 @@ services:
         value: INFO
       - key: GRAPHIFY_CONCURRENCY
         value: "2"
+      # PAT do GitHub com leitura em repos privados (ex: Meta-ADS-Cerebro).
+      # Configure o valor no Dashboard do Render (Environment → Secret).
+      - key: GITHUB_TOKEN
+        sync: false
       # PORT é injetada automaticamente pelo Render — não defina manualmente

@@ -19,8 +19,14 @@ def _progress(cb: ProgressCallback, value: float, message: str) -> None:
         cb(value, message)
 
 
-def _validate_github_url(url: str) -> str:
-    """Normaliza e valida URL de repositório GitHub."""
+def _validate_github_url(url: str) -> tuple[str, str, str]:
+    """
+    Normaliza e valida URL de repositório GitHub.
+
+    Returns:
+        (public_https_url, owner, repo) — URL sem credenciais, ex:
+        https://github.com/owner/repo.git
+    """
     url = (url or "").strip()
     if not url:
         raise ValueError("URL do repositório GitHub não pode ser vazia.")
@@ -35,16 +41,36 @@ def _validate_github_url(url: str) -> str:
 
     parsed = urlparse(url)
     if parsed.netloc not in {"github.com", "www.github.com"}:
-        raise ValueError(
-            "URL inválida. Use um repositório GitHub "
-            "(ex: https://github.com/usuario/vault-obsidian)."
-        )
+        # Também aceita URLs já autenticadas (token@github.com) só para extrair path
+        host = parsed.netloc.split("@")[-1] if "@" in parsed.netloc else parsed.netloc
+        if host not in {"github.com", "www.github.com"}:
+            raise ValueError(
+                "URL inválida. Use um repositório GitHub "
+                "(ex: https://github.com/usuario/vault-obsidian)."
+            )
 
     parts = [p for p in parsed.path.strip("/").split("/") if p]
     if len(parts) < 2:
         raise ValueError("URL incompleta. Esperado: https://github.com/usuario/repo")
 
     owner, repo = parts[0], parts[1].removesuffix(".git")
+    public_url = f"https://github.com/{owner}/{repo}.git"
+    return public_url, owner, repo
+
+
+def _build_clone_url(owner: str, repo: str, token: Optional[str] = None) -> str:
+    """
+    Monta a URL de clone.
+
+    Com GITHUB_TOKEN (repo privado):
+        https://{token}@github.com/owner/repo.git
+    Sem token (repo público):
+        https://github.com/owner/repo.git
+    """
+    token = (token or os.getenv("GITHUB_TOKEN") or "").strip()
+    if token:
+        # Formato pedido: token embutido na URL HTTPS (funciona com PAT fine-grained/classic)
+        return f"https://{token}@github.com/{owner}/{repo}.git"
     return f"https://github.com/{owner}/{repo}.git"
 
 
@@ -57,6 +83,9 @@ def load_vault_from_github(
     """
     Clona um repositório GitHub contendo um vault Obsidian.
 
+    Repositórios privados exigem a variável de ambiente GITHUB_TOKEN
+    (Personal Access Token com permissão de leitura no repositório).
+
     Returns:
         Path do diretório do vault clonado.
     """
@@ -67,7 +96,11 @@ def load_vault_from_github(
             "GitPython não está instalado. Adicione 'GitPython' ao requirements.txt."
         ) from exc
 
-    clone_url = _validate_github_url(github_url)
+    public_url, owner, repo = _validate_github_url(github_url)
+    token = (os.getenv("GITHUB_TOKEN") or "").strip()
+    clone_url = _build_clone_url(owner, repo, token=token)
+    display_url = public_url  # nunca logar a URL com token
+
     base = Path(work_dir) if work_dir else Path(tempfile.mkdtemp(prefix="graphify_vault_"))
     base.mkdir(parents=True, exist_ok=True)
     target = base / "repo"
@@ -75,13 +108,35 @@ def load_vault_from_github(
     if target.exists():
         shutil.rmtree(target, ignore_errors=True)
 
-    _progress(progress, 0.1, f"Clonando repositório: {clone_url}")
+    auth_hint = " (autenticado via GITHUB_TOKEN)" if token else " (sem token — só repos públicos)"
+    _progress(progress, 0.1, f"Clonando repositório: {display_url}{auth_hint}")
     try:
         Repo.clone_from(clone_url, str(target), depth=depth)
     except Exception as exc:
+        detail = str(exc)
+        # Evita vazar o token se o git incluir a URL no erro
+        if token:
+            detail = detail.replace(token, "***")
+            detail = detail.replace(clone_url, display_url)
+
+        hints: list[str] = []
+        if not token:
+            hints.append(
+                "Repositório privado? Defina a variável de ambiente GITHUB_TOKEN "
+                "(PAT com leitura no repo) no serviço Render/Space."
+            )
+        elif "Authentication" in detail or "Username" in detail or "403" in detail or "401" in detail:
+            hints.append(
+                "GITHUB_TOKEN presente, mas a autenticação falhou. "
+                "Verifique se o token é válido e tem permissão de leitura no repositório."
+            )
+        else:
+            hints.append("Verifique se a URL está correta e se o token tem acesso ao repositório.")
+
         raise RuntimeError(
-            f"Falha ao clonar repositório. Verifique se a URL é pública e válida.\n"
-            f"Detalhe: {exc}"
+            f"Falha ao clonar repositório: {display_url}\n"
+            + "\n".join(hints)
+            + f"\nDetalhe: {detail}"
         ) from exc
 
     _progress(progress, 0.35, "Repositório clonado com sucesso.")

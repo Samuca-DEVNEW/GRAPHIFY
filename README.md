@@ -35,7 +35,7 @@ Este Hugging Face Space foi desenhado para:
 
 | Recurso | Descrição |
 |--------|-----------|
-| 📥 **GitHub URL** | Clona repositório público com o vault |
+| 📥 **GitHub URL** | Clona repositório (público ou privado com `GITHUB_TOKEN`) |
 | 📦 **Upload ZIP** | Alternativa sem Git |
 | 🕸️ **Grafo NetworkX** | Nós = notas, arestas = wikilinks |
 | 📊 **Métricas** | Grau, densidade, clustering, betweenness, comunidades |
@@ -48,7 +48,7 @@ Este Hugging Face Space foi desenhado para:
 ## 🚀 Como usar (interface)
 
 1. Abra a aba **Processar Vault**
-2. Cole a URL de um repositório GitHub **público** com notas `.md`  
+2. Cole a URL de um repositório GitHub com notas `.md` (público **ou** privado se `GITHUB_TOKEN` estiver configurado)  
    **ou** envie um ZIP do vault
 3. Clique em **Processar / Gerar Grafo**
 4. Explore:
@@ -61,10 +61,77 @@ Este Hugging Face Space foi desenhado para:
 
 ```text
 https://github.com/usuario/meu-vault-obsidian
+https://github.com/Samuca-DEVNEW/Meta-ADS-Cerebro
 usuario/meu-vault-obsidian
 ```
 
-> **Nota:** repositórios privados não são suportados sem token (Space público).
+---
+
+## 🔐 Repositórios privados (`GITHUB_TOKEN`)
+
+O refresh/clone de vaults **privados** (ex.: `Meta-ADS-Cerebro`) usa o token da variável de ambiente **`GITHUB_TOKEN`**.
+
+Sem o token, o Git tenta autenticar interativamente e falha no Render com:
+
+```text
+fatal: could not read Username for 'https://github.com'
+```
+
+### Como o clone funciona
+
+Com o token definido, o Graphify clona assim:
+
+```text
+https://{GITHUB_TOKEN}@github.com/OWNER/REPO.git
+```
+
+(sem expor o token em logs ou na UI)
+
+### 1) Criar um Personal Access Token no GitHub
+
+1. GitHub → **Settings** → **Developer settings** → **Personal access tokens**
+2. Crie um token com leitura no repositório:
+   - **Fine-grained:** Resource owner = `Samuca-DEVNEW`, repositório `Meta-ADS-Cerebro`, permissão **Contents: Read-only**
+   - **Classic (PAT):** escopo `repo` (ou só o mínimo necessário para clonar)
+3. Copie o token (`ghp_...` ou `github_pat_...`) — ele só aparece uma vez
+
+### 2) Configurar no Render (obrigatório para repo privado)
+
+1. Abra o [Dashboard do Render](https://dashboard.render.com)
+2. Selecione o serviço **graphify** (Web Service)
+3. Vá em **Environment**
+4. Clique em **Add Environment Variable**
+5. Preencha:
+   - **Key:** `GITHUB_TOKEN`
+   - **Value:** o PAT copiado (marque como **Secret** se a UI oferecer)
+6. Salve e faça **Manual Deploy** → **Deploy latest commit** (ou aguarde o redeploy automático)
+
+O `render.yaml` já declara a chave (valor **não** vai no Git — `sync: false`):
+
+```yaml
+- key: GITHUB_TOKEN
+  sync: false
+```
+
+### 3) Conferir se está ok
+
+- Logs do deploy **não** devem mostrar o token
+- Ao processar `https://github.com/Samuca-DEVNEW/Meta-ADS-Cerebro`, o status deve indicar clone autenticado via `GITHUB_TOKEN`
+- Se ainda falhar com 401/403: token expirado, sem permissão no repo, ou variável com nome errado
+
+### 4) Desenvolvimento local
+
+```bash
+# Windows (PowerShell)
+$env:GITHUB_TOKEN = "ghp_seu_token_aqui"
+python app.py
+
+# Linux/macOS
+export GITHUB_TOKEN=ghp_seu_token_aqui
+python app.py
+```
+
+> **Nunca** commite o token no repositório, no `README` ou em issues.
 
 ---
 
@@ -296,11 +363,11 @@ Abra `http://127.0.0.1:7860`.
 
 ## ⚠️ Limitações
 
-- Repositórios **privados** exigem autenticação (não incluso por padrão)
+- Repositórios **privados** exigem `GITHUB_TOKEN` no ambiente (ver seção acima)
 - Vaults muito grandes (>~2–3k notas) podem ser lentos; a visualização amostra até ~300 nós
 - Betweenness centrality só é calculada para grafos com até 400 nós
 - Estado do grafo fica **em memória no processo** do Space (sem multi-tenant isolado)
-- Em Spaces free, cold start e timeout da fila Gradio podem ocorrer — o Worker DANTE deve retentar
+- Em Spaces free / Render free, cold start e timeout da fila Gradio podem ocorrer — o Worker DANTE deve retentar
 
 ---
 
@@ -308,6 +375,7 @@ Abra `http://127.0.0.1:7860`.
 
 - Vaults enviados via ZIP são extraídos em diretório temporário
 - Não há persistência intencional entre reinícios do Space
+- `GITHUB_TOKEN` deve ser secret no Render — nunca no código
 - Não envie vaults com segredos (tokens, senhas) para Spaces públicos
 
 ---
